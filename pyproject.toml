@@ -1,0 +1,85 @@
+[project]
+name = "chaihuo-reachy"
+version = "0.1.0"
+description = "柴火基地车 Reachy Mini 智能语音助手 — ASR/LLM/TTS via 阿里云百炼"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+keywords = ["reachy-mini", "voice-assistant", "bailian", "mcv"]
+dependencies = [
+    "numpy>=2.2.5,<2.3",
+    "onnxruntime==1.23.2",
+    "websockets>=15.0,<16",
+    "httpx>=0.28.0",
+    "sounddevice>=0.4.6",
+    # Reachy Mini XMOS card: PortAudio/mmap capture is silent, use ALSA rw
+    # (Linux only — needs ALSA headers; macOS dev uses sounddevice)
+    "pyalsaaudio>=0.10.0; sys_platform == 'linux'",
+    "pyyaml>=6.0",
+    "dashscope>=1.25.6",
+    "python-dotenv>=1.0",
+    # Camera: Reachy Mini USB camera via OpenCV (Mac + Jetson)
+    "opencv-python>=4.10",
+    # Memory: vector search for journal retrieval
+    "chromadb>=0.5",
+    # Wake word: local on-device detection
+    "pvporcupine>=3.0",
+    # Web dashboard
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # Reachy daemon lifecycle; app media stays disabled because audio.py owns
+    # the one required full-duplex XMOS stream.
+    "reachy-mini==1.9.0rc1",
+    "sherpa-onnx>=1.13.4",
+    # sherpa-onnx 1.13.4 split its native runtime into a separate wheel, but
+    # its published resolver metadata does not consistently pull it in.
+    "sherpa-onnx-core==1.13.4",
+    "openwakeword>=0.6.0",
+    # Beat-dance: decode beat.mp3 → PCM for the ALSA playback pipeline
+    "miniaudio>=1.59",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "tomli>=2.0; python_version < '3.11'",
+]
+jetson = [
+    # JetPack 6.2 / CUDA 12.6 / Python 3.10 aarch64 build.  Keep the hash in
+    # the direct URL so uv verifies the exact Jetson AI Lab artifact.
+    "torch @ https://pypi.jetson-ai-lab.io/jp6/cu126/+f/62a/1beee9f2f1470/torch-2.8.0-cp310-cp310-linux_aarch64.whl#sha256=62a1beee9f2f147076a974d2942c90060c12771c94740830327cae705b2595fc ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    # --system-site-packages exposes Ubuntu's NumPy-1.x-built pandas.  A venv
+    # copy prevents that optional sklearn import from breaking under NumPy 2.2.
+    "pandas>=2.2,<2.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[project.scripts]
+chaihuo-reachy = "chaihuo_reachy.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build]
+exclude = [
+    "/data",
+    "/dist",
+    "/models",
+    "/.venv",
+    "/.pytest_cache",
+    "/.firecrawl",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chaihuo_reachy"]
+artifacts = [
+    "src/chaihuo_reachy/dashboard.html",
+    "src/chaihuo_reachy/profiles/**/*.txt",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
