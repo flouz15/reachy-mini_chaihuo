@@ -152,13 +152,25 @@ def resolve_audio_device(
     normalized_selector = _normalized_device_name(selector or "auto")
 
     if normalized_selector in ("", "auto"):
+        def _is_reachy_duplex(device: dict[str, object]) -> bool:
+            name = _normalized_device_name(device.get("name", ""))
+            return (
+                _REACHY_DEVICE_NAME in name
+                and "camera" not in name
+                and int(device.get("max_input_channels", 0)) > 0
+                and int(device.get("max_output_channels", 0)) > 0
+            )
+
         candidates = [
+            index for index, device in enumerate(table) if _is_reachy_duplex(device)
+        ]
+        # Prefer the ALSA hardware node. PipeWire aliases like "default" /
+        # "pipewire" are the laptop card, and PortAudio indexes move after replug.
+        hardware = [
             index
-            for index, device in enumerate(table)
-            if _REACHY_DEVICE_NAME in _normalized_device_name(device.get("name", ""))
-            and "camera" not in _normalized_device_name(device.get("name", ""))
-            and int(device.get("max_input_channels", 0)) > 0
-            and int(device.get("max_output_channels", 0)) > 0
+            for index in candidates
+            if "hw:" in _normalized_device_name(table[index].get("name", ""))
+            or "usb audio" in _normalized_device_name(table[index].get("name", ""))
         ]
         exact = [
             index
@@ -166,7 +178,9 @@ def resolve_audio_device(
             if _normalized_device_name(table[index].get("name", ""))
             == _REACHY_DEVICE_NAME
         ]
-        if len(exact) == 1:
+        if len(hardware) == 1:
+            candidates = hardware
+        elif len(exact) == 1:
             candidates = exact
         if len(candidates) != 1:
             reason = (
@@ -175,8 +189,8 @@ def resolve_audio_device(
             raise AudioDeviceResolutionError(
                 "Reachy Mini full-duplex audio device was " + reason + ". "
                 "Check the USB connection, set REACHY_AUDIO_DEVICE to a unique "
-                "name/index, or explicitly use REACHY_AUDIO_DEVICE=default for "
-                "local Mac audio. Available: " + _candidate_summary(table)
+                "name, or explicitly use REACHY_AUDIO_DEVICE=default for "
+                "local Mac/PC audio. Available: " + _candidate_summary(table)
             )
         return _build_info("auto", table, candidates[0], candidates[0])
 

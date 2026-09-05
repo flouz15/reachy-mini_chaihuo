@@ -61,6 +61,9 @@ class Config:
     asr_speech_max_duration_s: float = 15.0  # Compatibility hard ceiling
     asr_finalize_timeout_s: float = 2.0
     asr_min_chars: int = 2
+    asr_connect_timeout_s: float = 8.0
+    asr_reconnect_delay_s: float = 5.0
+    asr_reconnect_attempts: int = 5
 
     # ── LLM settings ───────────────────────────────────────────────────
     llm_temperature: float = 0.4
@@ -93,26 +96,27 @@ class Config:
     kws_model_dir: str = "models/kws"
     # Tuned for a visitor speaking at a normal near-field volume.  The old
     # 0.35/1.0 pair required shouting on the Reachy XMOS microphone.
-    kws_threshold: float = 0.20  # Lower = easier to trigger; 0.20 avoids shouting
+    kws_threshold: float = 0.15  # Lower = easier to trigger; USB XMOS is quieter than Mac
     kws_score: float = 1.5  # Modest beam boost for the custom Chinese keyword
     wake_listen_timeout_s: float = 60.0  # Max time waiting for the wake word locally
     # The SDK AEC channel has an idle RMS around 0.08-0.14 on the current
     # hardware. Keep standby recognition and interruption above that floor.
-    voice_activity_threshold: float = 0.16
+    voice_activity_threshold: float = 0.08
     barge_in_enabled: bool = False
     barge_in_sensitivity: float = 0.18  # Mic RMS threshold for interrupting TTS (0-1)
 
     # ── Audio ──────────────────────────────────────────────────────────
-    # Safe default: auto-detect a unique Reachy full-duplex device. Use the
-    # explicit value "default" to opt into Mac/system input + output.
+    # USB / in-car: "auto" selects the unique Reachy Mini XMOS card by name.
+    # Device indexes change after replug, so do not pin a PortAudio number.
+    # Use "default" only for laptop/Mac mic and speaker.
     audio_device: str | int | None = "auto"
     audio_sample_rate: int = 16000
-    audio_input_channel: int = 1  # Reachy ch1 = AEC-processed (echo-cancelled)
+    audio_input_channel: int = 1  # Reachy Mini AEC-processed mic channel
     audio_mic_gain: float = 1.0  # Unity gain; avoid clipping that degrades ASR
     audio_frontend_v2: bool = True
     vad_model_path: str = "models/vad/silero_vad.onnx"
-    vad_on_threshold: float = 0.60
-    vad_off_threshold: float = 0.35
+    vad_on_threshold: float = 0.40
+    vad_off_threshold: float = 0.22
     endpoint_silence_ms: int = 700
     max_utterance_s: float = 15.0
     min_utterance_ms: int = 200
@@ -294,6 +298,9 @@ _ENV: dict[str, str] = {
     "asr_speech_max_duration_s": "BAILIAN_ASR_SPEECH_MAX_DURATION_S",
     "asr_min_chars": "BAILIAN_ASR_MIN_CHARS",
     "asr_finalize_timeout_s": "BAILIAN_ASR_FINALIZE_TIMEOUT_S",
+    "asr_connect_timeout_s": "BAILIAN_ASR_CONNECT_TIMEOUT_S",
+    "asr_reconnect_delay_s": "BAILIAN_ASR_RECONNECT_DELAY_S",
+    "asr_reconnect_attempts": "BAILIAN_ASR_RECONNECT_ATTEMPTS",
     "llm_temperature": "BAILIAN_LLM_TEMPERATURE",
     "llm_max_tokens": "BAILIAN_LLM_MAX_TOKENS",
     "llm_system_prompt": "BAILIAN_LLM_SYSTEM_PROMPT",

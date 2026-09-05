@@ -176,25 +176,51 @@ def _find_named_reachy_camera_macos() -> str | None:
 def _find_reachy_camera_index_linux() -> int | str | None:
     """Find the Reachy Mini camera on Linux.
 
-    Tries sysfs names first (no v4l2-ctl dependency — the video node number
-    is unstable across reboots, e.g. /dev/video0 vs /dev/video1), then the
-    v4l2-ctl probe, then /dev/v4l/by-id symlinks.
+    Video node numbers change after replug. Prefer the named capture node
+    (index=0) and never fall back to the laptop webcam.
     """
     import glob
     import os
 
-    # 1) sysfs name match — robust, no external tooling
+    capture_nodes: list[str] = []
+    metadata_nodes: list[str] = []
     for node in sorted(glob.glob("/sys/class/video4linux/video*")):
         try:
             name = Path(node, "name").read_text(encoding="utf-8").strip().lower()
-            if "reachy" in name:
-                dev = f"/dev/{Path(node).name}"
-                logger.info("Found Reachy camera (sysfs): %s", dev)
-                return dev
+            if "reachy" not in name:
+                continue
+            dev = f"/dev/{Path(node).name}"
+            index_path = Path(node, "index")
+            index = (
+                index_path.read_text(encoding="utf-8").strip()
+                if index_path.exists()
+                else "0"
+            )
+            if index == "0":
+                capture_nodes.append(dev)
+            else:
+                metadata_nodes.append(dev)
         except Exception:
             pass
+    if len(capture_nodes) == 1:
+        logger.info("Found Reachy camera (sysfs capture): %s", capture_nodes[0])
+        return capture_nodes[0]
+    if len(capture_nodes) > 1:
+        logger.warning(
+            "Multiple Reachy capture nodes %s; using %s",
+            capture_nodes,
+            capture_nodes[0],
+        )
+        return capture_nodes[0]
+    if metadata_nodes:
+        logger.warning(
+            "Reachy camera metadata-only nodes %s; using %s",
+            metadata_nodes,
+            metadata_nodes[0],
+        )
+        return metadata_nodes[0]
 
-    # 2) v4l2-ctl probe (when installed)
+    # v4l2-ctl probe (when installed)
     for video_dev in sorted(glob.glob("/dev/video*")):
         try:
             result = subprocess.run(
@@ -252,6 +278,9 @@ def find_reachy_camera(config_value: int | str = "auto") -> int | str:
         dev = _find_reachy_camera_index_linux()
         if dev is not None:
             return dev
+        raise RuntimeError(
+            "未检测到名为 Reachy Mini Camera 的 USB 摄像头；拒绝回退到笔记本摄像头"
+        )
 
     logger.warning("Reachy camera not found — falling back to camera 0")
     return 0

@@ -355,6 +355,11 @@ class ConversationEngine:
         self._memory: MemoryStore | None = None
         self._location: LocationService | None = None
         self._wake: Any | None = None  # WakeWordDetector (local KWS) or None
+        self._asr: BailianASRClient | None = None
+        self._asr_connect_count = 0
+        self._asr_reconnects = 0
+        self._asr_last_error = ""
+        self._asr_retry_not_before = 0.0
         self._task: asyncio.Task | None = None
         self._voice_listen_task: asyncio.Task[str] | None = None
         self._voice_listener_preempted = False
@@ -677,6 +682,16 @@ class ConversationEngine:
                 logger.warning("本地唤醒不可用，回退云端唤醒: %s", exc)
                 self.config.wake_engine = "cloud"
 
+        try:
+            await self._ensure_asr_connected(initial=True)
+        except Exception as exc:
+            logger.warning(
+                "启动时云端听写未连上，唤醒后会按 %ds × %d 次重连: %s",
+                int(self.config.asr_reconnect_delay_s),
+                int(self.config.asr_reconnect_attempts),
+                exc,
+            )
+
         self._last_activity = time.monotonic()
         self._task = asyncio.create_task(self._conversation_loop())
         logger.info(
@@ -702,6 +717,9 @@ class ConversationEngine:
                 pass
         if self._location is not None:
             await self._location.stop()
+        if self._asr is not None:
+            await self._asr.close()
+            self._asr = None
         if self._audio is not None:
             observer_setter = getattr(self._audio, "set_playback_observer", None)
             if callable(observer_setter):
@@ -886,8 +904,8 @@ class ConversationEngine:
                 return ""
 
             self._set_state("listening")
-            logger.info("🎤 [聆听] 检测到语音，建立 ASR 连接...")
-            self._emit_asr_status("检测到语音，正在连接识别服务")
+            logger.info("🎤 [聆听] 检测到语音，使用启动时的云端听写连接...")
+            self._emit_asr_status("检测到语音，正在听写")
             return await self._listen_cloud_asr(
                 capture=capture, initial_audio=initial_audio
             )
@@ -1102,6 +1120,76 @@ class ConversationEngine:
         self._emit_asr_status("未检测到用户开口（未连接云端识别）")
         return []
 
+    async def _ensure_asr_connected(self, *, initial: bool = False) -> BailianASRClient:
+        """Keep one ASR WebSocket for the whole demo.
+
+        Startup connects once.  Later turns reuse that session.  If the
+        socket drops, reconnect every ``asr_reconnect_delay_s`` seconds up
+        to ``asr_reconnect_attempts`` times, then surface the error.
+        """
+        if self._asr is not None and self._asr.is_connected:
+            return self._asr
+
+        now = time.monotonic()
+        if (
+            not initial
+            and now < self._asr_retry_not_before
+        ):
+            raise RuntimeError(self._asr_last_error or "ASR reconnect cooling down")
+
+        if self._asr is None:
+            self._asr = BailianASRClient(self.config)
+
+        attempts = 1 if initial else max(1, int(self.config.asr_reconnect_attempts))
+        delay_s = max(0.0, float(self.config.asr_reconnect_delay_s))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                if not initial and attempt > 1:
+                    self._emit_asr_status(
+                        f"语音识别已断开，{delay_s:.0f}s 后重连（{attempt}/{attempts}）"
+                    )
+                    await asyncio.sleep(delay_s)
+                elif initial and attempt == 1:
+                    self._emit_asr_status("正在连接云端听写…")
+                await self._asr.connect()
+                self._asr_connect_count += 1
+                self._asr_last_error = ""
+                self._asr_retry_not_before = 0.0
+                if initial:
+                    logger.info(
+                        "🎤 [ASR] 启动长连接就绪 (第 %d 次)",
+                        self._asr_connect_count,
+                    )
+                elif attempt > 1:
+                    self._asr_reconnects += 1
+                    logger.info(
+                        "🎤 [ASR] 重连成功 (attempt=%d/%d, 累计连接 %d 次)",
+                        attempt,
+                        attempts,
+                        self._asr_connect_count,
+                    )
+                return self._asr
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                self._asr_last_error = str(exc)
+                logger.warning(
+                    "ASR 连接失败 (%d/%d): %s",
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                try:
+                    await self._asr.close()
+                except Exception:
+                    logger.debug("ASR close after failed connect", exc_info=True)
+        assert last_error is not None
+        self._asr_retry_not_before = time.monotonic() + delay_s
+        self._emit_asr_status("语音识别连接失败，请稍后重试")
+        raise last_error
+
     async def _listen_cloud_asr(
         self,
         capture: Any,
@@ -1110,8 +1198,9 @@ class ConversationEngine:
         """Stream mic audio to Bailian realtime ASR via WebSocket.
 
         ``capture`` is the duplex capture iterator opened by the caller
-        (shared with the local VAD / wake-word gate); audio arriving while
-        the ASR connection is established is buffered in ``audio_queue`` so
+        (shared with the local VAD / wake-word gate); the ASR WebSocket is
+        opened once at engine start and reused here.  Audio arriving while
+        the listener is spinning up is buffered in ``audio_queue`` so
         nothing spoken after the wake word is lost.
 
         Server-side VAD (``turn_detection.server_vad``) detects
@@ -1227,12 +1316,20 @@ class ConversationEngine:
         capture_task = asyncio.create_task(_capture())
 
         try:
-            async with BailianASRClient(self.config) as asr:
-                await asr.configure()
-                logger.info(
-                    "🎤 [ASR] WebSocket 已连接 (耗时 %.2fs)",
-                    time.monotonic() - t_connect,
-                )
+            try:
+                asr = await self._ensure_asr_connected()
+            except Exception as exc:
+                self._last_asr_end_reason = "asr_connect_failed"
+                self._asr_last_error = str(exc)
+                logger.warning("ASR 当前不可用: %s", exc)
+                return ""
+            asr.reset_turn()
+            logger.info(
+                "🎤 [ASR] 复用启动连接 (本次确认 %.2fs, 累计连接 %d 次)",
+                time.monotonic() - t_connect,
+                self._asr_connect_count,
+            )
+            try:
 
                 final_text = ""
                 speech_count = 0
@@ -1248,6 +1345,8 @@ class ConversationEngine:
                                 continue
                             await asr.send_audio(chunk)
                         except asyncio.TimeoutError:
+                            if not asr.is_connected:
+                                raise ConnectionError("ASR connection closed")
                             if local_endpoint.is_set() and audio_queue.empty():
                                 await asr.finish()
                                 finish_sent = True
@@ -1381,10 +1480,10 @@ class ConversationEngine:
                     feed_task.cancel()
                     try:
                         await feed_task
-                    except asyncio.CancelledError:
+                    except (asyncio.CancelledError, ConnectionError):
                         pass
 
-                if not finish_sent:
+                if not finish_sent and asr.is_connected:
                     await asr.finish()
 
                 # ── Empty-result diagnostics ─────────────────────────
@@ -1416,6 +1515,11 @@ class ConversationEngine:
                     )
 
                 return final_text.strip()
+            except Exception as exc:
+                self._asr_last_error = str(exc)
+                if self._asr is not None:
+                    await self._asr.close()
+                raise
         finally:
             capture_done.set()
             capture_task.cancel()
@@ -2672,6 +2776,10 @@ class ConversationEngine:
                 "speech_max_duration_s": self.config.asr_speech_max_duration_s,
                 "last_end_reason": self._last_asr_end_reason,
                 "frontend_v2": self.config.audio_frontend_v2,
+                "connected": bool(self._asr is not None and self._asr.is_connected),
+                "connect_count": self._asr_connect_count,
+                "reconnects": self._asr_reconnects,
+                "last_error": self._asr_last_error,
                 **self._audio_frontend_metrics,
             },
             "conversation_turns": len(self._conversation_history) // 2,

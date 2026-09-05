@@ -2333,24 +2333,27 @@ async def _try_connect_daemon_impl(cfg: Config) -> tuple:
     can_spawn_locally = cfg.daemon_host in {"", "localhost", "127.0.0.1", "::1"}
     if (
         reachy is None
+        and mode == "auto"
+        and can_spawn_locally
+        and _daemon_owner(cfg) == "owned"
+    ):
+        # Motor-link errors are terminal for the leftover process, not for
+        # USB hardware.  Auto must reclaim our own daemon so start-pc.sh
+        # can spawn a fresh one instead of falling to standalone.
+        logger.warning(
+            "本项目遗留 daemon 不健康（%s），回收后重新拉起",
+            terminal_error or "未就绪",
+        )
+        await _recover_owned_daemon(cfg)
+        terminal_error = ""
+    elif (
+        reachy is None
         and not terminal_error
         and mode == "auto"
         and can_spawn_locally
         and await _daemon_port_is_occupied(cfg)
     ):
-        # The port is held by a daemon we could not connect to.  If the
-        # ownership manifest still validates it (a leftover from a previous
-        # run whose shutdown was aborted, or one whose motor link died),
-        # reclaim it and fall through to a fresh spawn — otherwise the
-        # robot would stay dead forever behind an unhealthy zombie.
-        if _daemon_owner(cfg) == "owned":
-            logger.warning(
-                "检测到本项目遗留的 reachy-mini-daemon（PID 来自 %s），回收后重新拉起",
-                cfg.daemon_state_file,
-            )
-            await _recover_owned_daemon(cfg)
-        else:
-            terminal_error = "本机 daemon 端口已被外部或异常进程占用，auto 模式不会接管"
+        terminal_error = "本机 daemon 端口已被外部或异常进程占用，auto 模式不会接管"
     if (
         reachy is None
         and not terminal_error
@@ -2617,7 +2620,7 @@ def main() -> None:
 
             cfg.camera_device = find_reachy_camera("auto")
     elif cfg.target == "mac" and cfg.daemon_host == "reachy-mini.local":
-        # macOS Lite: daemon runs locally (USB-connected), not on the robot.
+        # USB / in-car Lite: daemon runs on this machine, not on the robot.
         # Only override the default; explicit REACHY_DAEMON_HOST wins.
         cfg.daemon_host = "localhost"
 
@@ -2735,7 +2738,7 @@ async def _start_dashboard(cfg: Config, *, standalone: bool = False) -> None:
         ) = await _try_connect_daemon(cfg)
     # When running without the robot (standalone or daemon unavailable),
     # switch to the default Mac/PC audio device instead of looking for
-    # the Reachy Mini sound card.
+    # the Reachy Mini sound card.  USB / in-car still uses this path.
     if audio_backend is None and cfg.audio_device in (None, "auto"):
         cfg.audio_device = "default"
     try:
