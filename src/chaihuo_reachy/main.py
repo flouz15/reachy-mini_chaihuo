@@ -1884,7 +1884,7 @@ def _resolve_daemon_serial_port(cfg: Config) -> str:
         return configured
     if configured and Path(configured).exists():
         return configured
-    candidates = sorted(Path("/dev").glob("cu.usbmodem*"))
+    candidates = _discover_daemon_serial_candidates()
     if len(candidates) == 1:
         resolved = str(candidates[0])
         logger.warning("配置串口不可用，自动恢复唯一 USB 串口: %s", resolved)
@@ -1895,15 +1895,39 @@ def _resolve_daemon_serial_port(cfg: Config) -> str:
                 f"配置串口不存在，发现多个候选串口: {', '.join(map(str, candidates))}"
             )
         raise RuntimeError(
-            f"配置串口不存在且未发现 /dev/cu.usbmodem* 设备: {configured}"
+            f"配置串口不存在且未发现 USB 串口设备: {configured}"
         )
     if len(candidates) > 1:
         raise RuntimeError(
             f"未配置串口，发现多个候选串口: {', '.join(map(str, candidates))}"
         )
     if not candidates:
-        raise RuntimeError("未配置串口且未发现 /dev/cu.usbmodem* 设备")
+        raise RuntimeError("未配置串口且未发现 USB 串口设备")
     return str(candidates[0])
+
+
+def _discover_daemon_serial_candidates() -> list[Path]:
+    """Find Reachy motor-controller serial ports on macOS and Linux."""
+    search_roots = (
+        (Path("/dev/serial/by-id"), ("*USB_Single_Serial*", "*1a86*")),
+        (Path("/dev"), ("cu.usbmodem*", "ttyACM*")),
+    )
+    discovered: list[Path] = []
+    seen_resolved: set[Path] = set()
+    for root, patterns in search_roots:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for candidate in sorted(root.glob(pattern)):
+                try:
+                    resolved = candidate.resolve(strict=False)
+                except OSError:
+                    resolved = candidate
+                if resolved in seen_resolved:
+                    continue
+                seen_resolved.add(resolved)
+                discovered.append(candidate)
+    return discovered
 
 
 def _clear_persisted_startup_app() -> None:
@@ -1923,19 +1947,18 @@ def _spawn_sdk_daemon_process(cfg: Config, resolved_serial_port: str | None = No
     import shutil
     import subprocess
 
-    executable = shutil.which("reachy-mini-daemon")
+    # Prefer the daemon next to this app's interpreter. Conda/system PATH
+    # often contains a different reachy-mini-daemon with a mismatched SDK
+    # version, which then burns CPU and never stays ready.
+    # Do not resolve the Python symlink: venv/bin/python commonly points
+    # to /usr/bin/python, while the console script we need remains in the
+    # original venv/bin directory.
+    executable = None
+    venv_daemon = Path(sys.executable).with_name("reachy-mini-daemon")
+    if venv_daemon.is_file() and os.access(venv_daemon, os.X_OK):
+        executable = str(venv_daemon)
     if not executable:
-        # Non-interactive SSH/nohup launches often do not inherit the venv's
-        # ``bin`` directory in PATH even though this application itself is
-        # running from that venv.  The SDK daemon is installed beside the
-        # current Python interpreter, so resolve that deterministic sibling
-        # before declaring the runtime unavailable.
-        # Do not resolve the Python symlink: venv/bin/python commonly points
-        # to /usr/bin/python, while the console script we need remains in the
-        # original venv/bin directory.
-        venv_daemon = Path(sys.executable).with_name("reachy-mini-daemon")
-        if venv_daemon.is_file() and os.access(venv_daemon, os.X_OK):
-            executable = str(venv_daemon)
+        executable = shutil.which("reachy-mini-daemon")
     if not executable:
         raise RuntimeError("reachy-mini-daemon executable was not found")
     # The daemon is a headless hardware driver, not an application launcher.

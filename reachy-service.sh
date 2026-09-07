@@ -120,7 +120,9 @@ start_service() {
     printf '\n[%s] service start\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "${LOG_FILE}"
     (
         cd "${PROJECT_DIR}" || exit 1
-        exec nohup env PYTHONUNBUFFERED=1 "${PYTHON}" -m chaihuo_reachy.main dashboard "$@"
+        # setsid detaches from the caller session so SSH/tool shells
+        # closing later cannot take the Dashboard down with them.
+        exec setsid env PYTHONUNBUFFERED=1 "${PYTHON}" -m chaihuo_reachy.main dashboard "$@"
     ) >> "${LOG_FILE}" 2>&1 < /dev/null &
     pid=$!
     printf '%s\n' "${pid}" > "${PID_FILE}"

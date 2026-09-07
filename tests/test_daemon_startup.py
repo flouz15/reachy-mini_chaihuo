@@ -34,9 +34,12 @@ def test_startup_clears_any_persisted_official_app(monkeypatch) -> None:
     assert calls == [None]
 
 
-def test_spawn_uses_real_hardware_mode_by_default(monkeypatch) -> None:
+def test_spawn_uses_real_hardware_mode_by_default(monkeypatch, tmp_path) -> None:
     commands: list[list[str]] = []
+    daemon = tmp_path / "reachy-mini-daemon"
+    daemon.touch(mode=0o755)
     monkeypatch.setattr(main_module, "_clear_persisted_startup_app", lambda: None)
+    monkeypatch.setattr(main_module.sys, "executable", str(tmp_path / "python"))
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/reachy-mini-daemon")
     monkeypatch.setattr(
         "subprocess.Popen",
@@ -48,7 +51,7 @@ def test_spawn_uses_real_hardware_mode_by_default(monkeypatch) -> None:
 
     assert commands == [
         [
-            "/usr/local/bin/reachy-mini-daemon",
+            str(daemon),
             "--autostart",
             "--headless",
             "--no-wake-up-on-start",
@@ -57,7 +60,7 @@ def test_spawn_uses_real_hardware_mode_by_default(monkeypatch) -> None:
             "/dev/cu.usbmodem-test",
         ],
         [
-            "/usr/local/bin/reachy-mini-daemon",
+            str(daemon),
             "--autostart",
             "--headless",
             "--no-wake-up-on-start",
@@ -67,9 +70,12 @@ def test_spawn_uses_real_hardware_mode_by_default(monkeypatch) -> None:
     ]
 
 
-def test_spawn_passes_no_media_to_prevent_direct_backend_conflict(monkeypatch) -> None:
+def test_spawn_passes_no_media_to_prevent_direct_backend_conflict(monkeypatch, tmp_path) -> None:
     commands: list[list[str]] = []
+    daemon = tmp_path / "reachy-mini-daemon"
+    daemon.touch(mode=0o755)
     monkeypatch.setattr(main_module, "_clear_persisted_startup_app", lambda: None)
+    monkeypatch.setattr(main_module.sys, "executable", str(tmp_path / "python"))
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/reachy-mini-daemon")
     monkeypatch.setattr(
         "subprocess.Popen",
@@ -80,6 +86,7 @@ def test_spawn_passes_no_media_to_prevent_direct_backend_conflict(monkeypatch) -
         Config(media_backend="no_media", daemon_serial_port="/dev/cu.usbmodem-test")
     )
 
+    assert commands[0][0] == str(daemon)
     assert commands[0][-1] == "--no-media"
 
 
@@ -120,7 +127,11 @@ def test_resolve_serial_recovers_only_unique_candidate(monkeypatch, tmp_path) ->
     missing = tmp_path / "missing"
     candidate = tmp_path / "cu.usbmodem-unique"
     candidate.touch()
-    monkeypatch.setattr(main_module.Path, "glob", lambda _self, _pattern: [candidate])
+    monkeypatch.setattr(
+        main_module,
+        "_discover_daemon_serial_candidates",
+        lambda: [candidate],
+    )
 
     assert main_module._resolve_daemon_serial_port(
         Config(daemon_serial_port=str(missing))
@@ -131,7 +142,11 @@ def test_resolve_serial_rejects_ambiguous_candidates(monkeypatch, tmp_path) -> N
     missing = tmp_path / "missing"
     first = tmp_path / "cu.usbmodem-a"
     second = tmp_path / "cu.usbmodem-b"
-    monkeypatch.setattr(main_module.Path, "glob", lambda _self, _pattern: [first, second])
+    monkeypatch.setattr(
+        main_module,
+        "_discover_daemon_serial_candidates",
+        lambda: [first, second],
+    )
 
     with pytest.raises(RuntimeError, match="多个候选串口"):
         main_module._resolve_daemon_serial_port(Config(daemon_serial_port=str(missing)))
