@@ -12,8 +12,8 @@ import numpy as np
 
 
 # The Dashboard's 0-100 scale maps quadratically to PCM gain. This keeps
-# lower listening levels controllable while 100% reaches +12 dB over 50%.
-MAX_PLAYBACK_GAIN = 8.0
+# lower listening levels controllable while 100% reaches the configured maximum gain.
+MAX_PLAYBACK_GAIN = 10.0
 
 PlaybackObserver = Callable[[bytes, int], None]
 

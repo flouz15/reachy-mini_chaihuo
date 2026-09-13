@@ -268,7 +268,11 @@ class EmptyJournalMemory:
 
 
 class CompleteFetcher:
+    def __init__(self) -> None:
+        self.sync_calls = 0
+
     async def sync(self, memory_store=None, **_kwargs) -> list[dict]:
+        self.sync_calls += 1
         return []
 
     def health(self) -> dict:
@@ -282,7 +286,11 @@ class CompleteFetcher:
 
 
 class PartialFetcher:
+    def __init__(self) -> None:
+        self.sync_calls = 0
+
     async def sync(self, memory_store=None, **_kwargs) -> list[dict]:
+        self.sync_calls += 1
         raise RuntimeError("one private TOC entry returned 401")
 
     def health(self) -> dict:
@@ -372,11 +380,14 @@ async def test_partial_directory_keeps_individually_verified_exact_date() -> Non
     engine._memory = ExactDateMemory(target_date)  # type: ignore[assignment]
     engine._journal_fetcher = PartialFetcher()  # type: ignore[assignment]
 
+    fetcher = engine._journal_fetcher
     context = await engine._verified_journal_context("昨天发生了什么？")
 
     assert target_date in context
     assert "这是已经完整下载并验证过的日记正文" in context
+    assert "本轮未在线同步" in context
     assert engine._current_sources[0]["slug"] == "exact-date"
+    assert getattr(fetcher, "sync_calls", 0) == 0
 
 
 @pytest.mark.asyncio
@@ -395,6 +406,22 @@ async def test_journey_scope_context_includes_all_verified_route_days() -> None:
         "middle",
         "end",
     ]
+
+
+@pytest.mark.asyncio
+async def test_verified_journal_context_does_not_sync_online() -> None:
+    engine = ConversationEngine(Config())
+    engine._memory = JourneyScopeMemory()  # type: ignore[assignment]
+    fetcher = CompleteFetcher()
+    engine._journal_fetcher = fetcher  # type: ignore[assignment]
+
+    context = await engine._verified_journal_context(
+        "我们在山西都去了哪些站点，帮我回忆一下"
+    )
+
+    assert "山西启程" in context
+    assert "本轮未在线同步" in context
+    assert fetcher.sync_calls == 0
 
 
 @pytest.mark.asyncio

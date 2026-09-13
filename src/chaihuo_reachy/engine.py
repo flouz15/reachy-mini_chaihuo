@@ -1336,23 +1336,26 @@ class ConversationEngine:
 
                 async def _feed_asr() -> None:
                     nonlocal finish_sent
-                    while not capture_done.is_set():
-                        try:
-                            chunk = await asyncio.wait_for(
-                                audio_queue.get(), timeout=0.1
-                            )
-                            if self._listening_is_blocked():
+                    try:
+                        while not capture_done.is_set():
+                            try:
+                                chunk = await asyncio.wait_for(
+                                    audio_queue.get(), timeout=0.1
+                                )
+                                if self._listening_is_blocked():
+                                    continue
+                                await asr.send_audio(chunk)
+                            except asyncio.TimeoutError:
+                                if not asr.is_connected:
+                                    raise ConnectionError("ASR connection closed")
+                                if local_endpoint.is_set() and audio_queue.empty():
+                                    await asr.finish()
+                                    finish_sent = True
+                                    feed_done.set()
+                                    return
                                 continue
-                            await asr.send_audio(chunk)
-                        except asyncio.TimeoutError:
-                            if not asr.is_connected:
-                                raise ConnectionError("ASR connection closed")
-                            if local_endpoint.is_set() and audio_queue.empty():
-                                await asr.finish()
-                                finish_sent = True
-                                feed_done.set()
-                                return
-                            continue
+                    except asyncio.CancelledError:
+                        return
 
                 feed_task = asyncio.create_task(_feed_asr())
 
@@ -1402,23 +1405,23 @@ class ConversationEngine:
                             else:
                                 if result_task is not None:
                                     result_task.cancel()
-                            self._last_asr_end_reason = timeout_reason
-                            message = (
-                                "未检测到用户开口"
-                                if timeout_reason == "initial_silence_timeout"
-                                else "未检测到完整语句，请缩短后重新说一次"
-                            )
-                            logger.warning(
-                                "ASR %s (initial=%.1fs, speech_max=%.1fs, "
-                                "queue=%d, dropped=%d)",
-                                timeout_reason,
-                                self.config.asr_initial_silence_timeout_s,
-                                self.config.asr_speech_max_duration_s,
-                                audio_queue.qsize(),
-                                dropped_frames,
-                            )
-                            self._emit_asr_status(message)
-                            break
+                                self._last_asr_end_reason = timeout_reason
+                                message = (
+                                    "未检测到用户开口"
+                                    if timeout_reason == "initial_silence_timeout"
+                                    else "未检测到完整语句，请缩短后重新说一次"
+                                )
+                                logger.warning(
+                                    "ASR %s (initial=%.1fs, speech_max=%.1fs, "
+                                    "queue=%d, dropped=%d)",
+                                    timeout_reason,
+                                    self.config.asr_initial_silence_timeout_s,
+                                    self.config.asr_speech_max_duration_s,
+                                    audio_queue.qsize(),
+                                    dropped_frames,
+                                )
+                                self._emit_asr_status(message)
+                                break
                         except StopAsyncIteration:
                             self._last_asr_end_reason = "result_stream_closed"
                             self._emit_asr_status("语音识别连接已结束，请重试")
@@ -1458,6 +1461,7 @@ class ConversationEngine:
                                 d = time.monotonic() - speech_start_time
                                 duration = f" ({d:.1f}s)"
                             logger.info("✅ [最终] %r%s", result.text, duration)
+                            finish_sent = True
                             if dropped_frames > 0:
                                 logger.warning(
                                     "⚠️  音频丢帧: %d 帧 — 可能影响识别",
@@ -1945,30 +1949,17 @@ class ConversationEngine:
         }
 
     async def _verified_journal_context(self, query: str) -> str:
-        """Online-check the corpus, revalidate candidates, then return evidence."""
-        from chaihuo_reachy.memory.journal_fetcher import journal_sync_lock
-
+        """Read verified local journal cache for keyword-matched turns only."""
         if self._memory is None:
             return ""
-        # Respect the cross-process sync lock (systemd timer / dashboard
-        # auto-sync): skip this tick when another sync owns the corpus.
-        with journal_sync_lock(self.config.journal_cache_dir) as acquired:
-            if acquired:
-                try:
-                    await self._journal_fetcher.sync(memory_store=self._memory)
-                except Exception:
-                    health = self._journal_fetcher.health()
-                    if not health["complete"]:
-                        logger.warning(
-                            "No verified journal cache is available", exc_info=True
-                        )
-                        return ""
-                    logger.warning(
-                        "Journal directory is partially unavailable; continuing with "
-                        "%d individually verified cached entries (%d expected)",
-                        health["complete"],
-                        health["expected"],
-                    )
+
+        # Conversation turns must stay offline against the local verified
+        # cache. Background/dashboard sync owns freshness; asking about
+        # diaries should never block on Yuque downloads mid-turn.
+        health = self._journal_fetcher.health()
+        if not health.get("complete") and not health.get("expected"):
+            logger.warning("No verified journal cache is available")
+            return ""
 
         target_date = _extract_target_date(query)
         recent_days = _extract_recent_window(query)
@@ -2016,54 +2007,15 @@ class ConversationEngine:
         ):
             return ""
 
-        candidate_slugs = [str(r.get("slug") or r.get("id") or "") for r in results]
-        candidate_slugs = [slug for slug in candidate_slugs if slug]
-        if not journey_overview:
-            with journal_sync_lock(self.config.journal_cache_dir) as acquired:
-                if not acquired:
-                    candidate_slugs = []  # busy: answer from the verified cache
-            try:
-                await self._journal_fetcher.sync(
-                    memory_store=self._memory,
-                    refresh_slugs=candidate_slugs,
-                )
-                journey_scope = (
-                    search_journey_scope(query, k=6)
-                    if not target_date
-                    and not recent_days
-                    and callable(search_journey_scope)
-                    else []
-                )
-                results = journey_scope or (
-                    self._memory.search_by_date(target_date, k=3)
-                    if target_date
-                    else (
-                        self._memory.search_recent(recent_days, k=6)
-                        if recent_days
-                        else (
-                            _keyword_search(self._memory, query, k=6)
-                            or self._memory.search(
-                                query, k=self.config.memory_top_k
-                            )
-                        )
-                    )
-                )
-            except Exception:
-                logger.warning(
-                    "Candidate journal revalidation was partial; using its "
-                    "individually verified cached copy"
-                )
-
         selected = (
             results
             if journey_overview
             else (results[:1] if exact_date else results[: 6 if journey_scope else 3])
         )
-        health = self._journal_fetcher.health()
+        last_success = health.get("last_success_at") or "未知"
         cache_note = (
-            f"缓存最后完整校验：{health['last_success_at']}。"
-            if health.get("failures")
-            else "本轮已在线校验官方目录和候选正文。"
+            f"使用本地已验证日记缓存（最后完整校验：{last_success}；"
+            "本轮未在线同步）。"
         )
         blocks = [cache_note]
         if journey_overview:

@@ -13,6 +13,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger("chaihuo_reachy.backends.factory")
 
 
+def _normalize_reachy_speaker_volume() -> None:
+    """Ensure Reachy USB speaker mixers start at a known loud level."""
+    try:
+        from chaihuo_reachy.audio import ensure_reachy_speaker_hardware_volume
+
+        ensure_reachy_speaker_hardware_volume(90)
+    except Exception as exc:  # pragma: no cover - best-effort hardware init
+        logger.warning("Reachy speaker hardware volume init failed: %s", exc)
+
+
 def create_camera_backend(
     config: "Config",
     media_manager: "MediaManager | None" = None,
@@ -70,6 +80,7 @@ def create_audio_backend(
     Returns:
         An AudioBackend instance.
     """
+    _normalize_reachy_speaker_volume()
     use_sdk = (
         media_manager is not None
         and config.media_backend != "no_media"

@@ -33,6 +33,95 @@ logger = logging.getLogger("chaihuo_reachy.audio")
 _REACHY_DEVICE_NAME = "reachy mini audio"
 
 
+def ensure_reachy_speaker_hardware_volume(percent: int = 90) -> bool:
+    """Force Reachy Mini ALSA speaker mixers to a known playback level.
+
+    Dashboard / TTS gain only scale the PCM samples we write. The XMOS card
+    still has its own ALSA mixers, and they survive across process restarts.
+
+    ``PCM,0`` is the stereo speaker path that actually drives the robot.
+    ``PCM,1`` is a joined mono control; raising it alone commonly leaves the
+    real output stuck around -23 dB, which sounds like a random quiet boot.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        return False
+
+    amixer = shutil.which("amixer")
+    if not amixer:
+        logger.warning(
+            "amixer not found; cannot initialize Reachy speaker hardware volume"
+        )
+        return False
+
+    level = f"{max(0, min(100, int(percent)))}%"
+    # Prefer the named USB card used by Reachy Mini. Fall back to numeric
+    # discovery if the card label is temporarily unavailable after replug.
+    card_candidates: list[str] = ["Audio"]
+    try:
+        with open("/proc/asound/cards", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                # Example: " 3 [Audio          ]: USB-Audio - Reachy Mini Audio"
+                lowered = line.lower()
+                if "reachy mini audio" in lowered or "[audio" in lowered:
+                    parts = line.strip().split()
+                    if parts and parts[0].isdigit():
+                        card_candidates.append(parts[0])
+    except OSError:
+        pass
+
+    # Preserve order while dropping duplicates.
+    seen: set[str] = set()
+    unique_cards: list[str] = []
+    for card in card_candidates:
+        if card not in seen:
+            seen.add(card)
+            unique_cards.append(card)
+
+    applied = False
+    for card in unique_cards:
+        for control in ("PCM,0", "PCM,1"):
+            probe = subprocess.run(
+                [amixer, "-c", card, "sget", control],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode != 0:
+                continue
+            set_result = subprocess.run(
+                [amixer, "-q", "-c", card, "sset", control, level],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if set_result.returncode == 0:
+                applied = True
+                logger.info(
+                    "Reachy speaker hardware volume set: card=%s control=%s level=%s",
+                    card,
+                    control,
+                    level,
+                )
+            else:
+                logger.warning(
+                    "Failed to set Reachy speaker hardware volume: "
+                    "card=%s control=%s level=%s err=%s",
+                    card,
+                    control,
+                    level,
+                    (set_result.stderr or set_result.stdout or "").strip(),
+                )
+        if applied:
+            return True
+    if not applied:
+        logger.warning("Reachy speaker hardware volume controls were not found")
+    return applied
+
+
 class AudioDeviceResolutionError(RuntimeError):
     """Raised when a requested duplex audio device is absent or ambiguous."""
 
@@ -304,7 +393,7 @@ class DuplexAudioIO:
         self._playback_done = False
         self._playback_sample_rate: int = sr  # source rate for resampling
         self._capture_event = asyncio.Event()
-        self._volume: float = 2.0  # Default gain for Reachy Mini speaker
+        self._volume: float = MAX_PLAYBACK_GAIN  # Dashboard 100% at startup
         self._play_rms: float = 0.0
         self._playback_observer: Callable[[bytes, int], None] | None = None
         self._capture_rms: float = 0.0  # Smoothed input level for diagnostics
@@ -315,6 +404,13 @@ class DuplexAudioIO:
         # silent on this card, so we fall back to pyalsaaudio rw-mode PCM,
         # the same path arecord uses and which is verified to produce audio).
         self._alsa: bool = _want_alsa_backend(self.resolved_info)
+        # Hardware mixer state persists across process restarts. Normalize it
+        # here so service launches that skip start-pc.sh still get loud, stable
+        # speaker output on the real stereo path (PCM,0).
+        if self._alsa or "reachy mini audio" in (
+            f"{self.resolved_info.input_name} {self.resolved_info.output_name}".lower()
+        ):
+            ensure_reachy_speaker_hardware_volume(90)
         self._alsa_stop = threading.Event()  # capture stop
         self._alsa_playback_stop = threading.Event()  # playback stop (dance music etc.)
         self._alsa_threads: list[threading.Thread] = []

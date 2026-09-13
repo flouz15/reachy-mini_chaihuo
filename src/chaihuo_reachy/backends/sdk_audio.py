@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Callable
 
 import numpy as np
 
+from chaihuo_reachy.audio import ensure_reachy_speaker_hardware_volume
 from chaihuo_reachy.backends.interfaces import MAX_PLAYBACK_GAIN
 
 if TYPE_CHECKING:
@@ -50,7 +51,10 @@ class SdkAudioIO:
         self._chunk_bytes = self._chunk_frames * 2  # int16 = 2 bytes/sample
         self._input_channel = input_channel  # 0=raw mic, 1=AEC processed
 
-        self._volume = 2.0  # Gain for Reachy Mini speaker
+        # Keep hardware speaker gain consistent even when the process is
+        # started without start-pc.sh (for example via reachy-service.sh).
+        ensure_reachy_speaker_hardware_volume(90)
+        self._volume = MAX_PLAYBACK_GAIN  # Dashboard 100% at startup
         self._play_rms = 0.0
         self._playback_observer: Callable[[bytes, int], None] | None = None
         self._output_sr = _DEFAULT_OUTPUT_SR

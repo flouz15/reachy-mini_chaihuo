@@ -152,7 +152,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;backg
   </div>
   <div class="vol">
     <label>🔊 扬声器音量</label>
-    <input type="range" id="volS" min="0" max="100" value="70" disabled>
+    <input type="range" id="volS" min="0" max="100" value="100" disabled>
     <div class="val" id="volV">--</div>
   </div>
   <button class="btn on" id="btnW" onclick="toggleWake()">🎤 唤醒词: 开启</button>
@@ -994,7 +994,7 @@ async def run_dashboard(
                     "type": "volume",
                     "volume": playback_percent_from_gain(engine._audio.volume)
                     if engine._audio
-                    else 80,
+                    else 100,
                 },
                 {"type": "wake_word", "enabled": cfg.enable_wake_word},
                 {
@@ -1134,11 +1134,11 @@ async def run_dashboard(
                 volume = (
                     playback_percent_from_gain(engine._audio.volume)
                     if engine._audio
-                    else 80
+                    else 100
                 )
                 await client.send_json({"type": "volume", "volume": volume})
             elif event_type == "set_volume":
-                volume = max(0, min(100, int(data.get("volume", 80))))
+                volume = max(0, min(100, int(data.get("volume", 100))))
                 if engine._audio:
                     engine._audio.volume = playback_gain_from_percent(volume)
                 broadcast({"type": "volume", "volume": volume})

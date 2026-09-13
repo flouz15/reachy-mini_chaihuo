@@ -73,7 +73,7 @@ class Config:
     # ── TTS settings ───────────────────────────────────────────────────
     tts_speech_rate: float = 1.0
     tts_pitch_rate: float = 1.0
-    tts_volume: int = 90  # Higher for Reachy Mini speaker
+    tts_volume: int = 100  # Higher for Reachy Mini speaker
     tts_sample_rate: int = 24000
 
     # ── Wake word ──────────────────────────────────────────────────────
@@ -81,9 +81,9 @@ class Config:
     # cloud ASR transcript matching in ``_accept_transcript()`` remains as
     # the ``cloud`` fallback.  Once detected, a ``wake_word_timeout_s``
     # grace window keeps the conversation open.
-    enable_wake_word: bool = True
+    enable_wake_word: bool = False
     wake_engine: str = (
-        "local"  # "local" (sherpa-onnx KWS) | "cloud" (ASR text match) | "off"
+        "off"  # "local" (sherpa-onnx KWS) | "cloud" (ASR text match) | "off"
     )
     wake_words: str = "皮皮虾"
     wake_word_timeout_s: float = 30.0
